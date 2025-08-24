@@ -47,16 +47,12 @@ export default function Home() {
 
       const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "https://<your-render-service>.onrender.com"
 
-      const sessionRes = await fetch(`${BASE}/session`, { method: "POST" })
-      if (!sessionRes.ok) {
-        const txt = await sessionRes.text()
-        throw new Error(`/session failed: ${sessionRes.status} ${txt.slice(0, 200)}`)
-      }
-      const session = await sessionRes.json()
-      const clientSecret = session?.client_secret?.value
-      if (!clientSecret) throw new Error("No client_secret returned from /session")
+      const health = await fetch(`${BASE}/health`)
+        .then((r) => r.text())
+        .catch(() => "bad")
+      if (health !== "ok") console.warn("Backend /health:", health)
 
-      // 2) Prepare WebRTC
+      // Prepare WebRTC
       const pc = new RTCPeerConnection({
         iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
       })
@@ -120,27 +116,24 @@ export default function Home() {
         }
       }
 
-      // 4) Mic capture
+      // Mic capture
       const mic = await navigator.mediaDevices.getUserMedia({ audio: true })
       conn.current.mic = mic
       mic.getTracks().forEach((t) => pc.addTrack(t, mic))
 
-      // 5) Offer → SDP to OpenAI Realtime with ephemeral secret → set answer
+      // Offer → SDP to OpenAI Realtime with ephemeral secret → set answer
       const offer = await pc.createOffer({ offerToReceiveAudio: true })
       await pc.setLocalDescription(offer)
 
-      const sdpResp = await fetch("https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview", {
+      const sdpResp = await fetch(`${BASE}/webrtc/offer`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${clientSecret}`, // IMPORTANT: ephemeral token, not your real key
-          "Content-Type": "application/sdp",
-        },
+        headers: { "Content-Type": "application/sdp" },
         body: offer.sdp,
       })
 
       if (!sdpResp.ok) {
         const t = await sdpResp.text()
-        throw new Error(`SDP error: ${sdpResp.status} ${t.slice(0, 200)}`)
+        throw new Error(`webrtc/offer error: ${sdpResp.status} ${t.slice(0, 200)}`)
       }
 
       const answerSDP = await sdpResp.text()
@@ -178,8 +171,8 @@ export default function Home() {
       dc.send(JSON.stringify({ type: "input_text.append", text: "Hi there!" }))
       dc.send(JSON.stringify({ type: "response.create" }))
 
-      pc.addEventListener("iceconnectionstatechange", () => console.log("ice", pc.iceConnectionState))
       pc.addEventListener("connectionstatechange", () => console.log("pc", pc.connectionState))
+      pc.addEventListener("iceconnectionstatechange", () => console.log("ice", pc.iceConnectionState))
 
       setStatus("connected")
     } catch (err: any) {
