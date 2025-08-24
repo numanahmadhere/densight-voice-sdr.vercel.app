@@ -1,6 +1,5 @@
 "use client"
 import { useEffect, useRef, useState } from "react"
-import { Mic, MicOff, Phone, PhoneOff } from "lucide-react"
 
 type Conn = {
   pc: RTCPeerConnection | null
@@ -31,7 +30,7 @@ function waitForChannelOpen(dc: RTCDataChannel, timeoutMs = 8000) {
 
 export default function Home() {
   const [status, setStatus] = useState<"idle" | "connecting" | "connected">("idle")
-  const [you, setYou] = useState("") // Your transcript (STT)
+  const [you, setYou] = useState("") // Your transcript
   const [agent, setAgent] = useState("") // Agent transcript
   const [errors, setErrors] = useState<string | null>(null)
 
@@ -47,12 +46,10 @@ export default function Home() {
 
       const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "https://<your-render-service>.onrender.com"
 
-      const health = await fetch(`${BASE}/health`)
-        .then((r) => r.text())
-        .catch(() => "bad")
-      if (health !== "ok") console.warn("Backend /health:", health)
+      // Optional warm-up
+      fetch(`${BASE}/health`).catch(() => {})
 
-      // Prepare WebRTC
+      // 1) RTCPeerConnection
       const pc = new RTCPeerConnection({
         iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
       })
@@ -79,27 +76,27 @@ export default function Home() {
         try {
           const msg = JSON.parse(ev.data)
 
-          // ——— USER STT (your speech) ———
+          // USER (your) transcript
           if (msg.type === "input_audio_transcription.delta" || msg.type === "transcript.delta") {
             append(setYou, msg.delta ?? "")
             return
           }
           if (msg.type === "input_audio_transcription.completed" || msg.type === "transcript.completed") {
-            append(setYou, "\n") // new line after your turn
+            append(setYou, "\n")
             return
           }
 
-          // ——— AGENT TEXT (model reply) ———
+          // AGENT transcript
           if (msg.type === "response.output_text.delta") {
             append(setAgent, msg.delta ?? "")
             return
           }
           if (msg.type === "response.output_text.done") {
-            append(setAgent, "\n") // new line after agent turn
+            append(setAgent, "\n")
             return
           }
 
-          // ——— TOOL CALL (logLead) ———
+          // Tool call: logLead
           if (msg.type === "response.function_call" && msg.name === "logLead") {
             fetch(`${BASE}/tools/logLead`, {
               method: "POST",
@@ -109,19 +106,19 @@ export default function Home() {
             return
           }
 
-          // Useful for debugging new/unknown event names
+          // Debug: uncomment to inspect unknown events
           // console.log("EV", msg);
         } catch {
-          // Non-JSON pings can be ignored
+          // ignore non-JSON pings
         }
       }
 
-      // Mic capture
+      // 3) Mic
       const mic = await navigator.mediaDevices.getUserMedia({ audio: true })
       conn.current.mic = mic
       mic.getTracks().forEach((t) => pc.addTrack(t, mic))
 
-      // Offer → SDP to OpenAI Realtime with ephemeral secret → set answer
+      // 4) SDP offer
       const offer = await pc.createOffer({ offerToReceiveAudio: true })
       await pc.setLocalDescription(offer)
 
@@ -129,20 +126,26 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/sdp" },
         body: offer.sdp,
+      }).catch((e) => {
+        throw new Error(`Fetch /webrtc/offer network error: ${e.message}`)
       })
 
       if (!sdpResp.ok) {
         const t = await sdpResp.text()
-        throw new Error(`webrtc/offer error: ${sdpResp.status} ${t.slice(0, 200)}`)
+        throw new Error(`/webrtc/offer ${sdpResp.status}: ${t.slice(0, 250)}`)
       }
 
       const answerSDP = await sdpResp.text()
       await pc.setRemoteDescription({ type: "answer", sdp: answerSDP })
 
+      // 6) Wait for data channel to open before sending kickoff
       await waitForChannelOpen(dc)
 
+      // Optional: also wait briefly for ICE to connect
       await new Promise<void>((resolve) => {
-        if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") return resolve()
+        if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+          return resolve()
+        }
         const handler = () => {
           if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
             pc.removeEventListener("iceconnectionstatechange", handler)
@@ -150,27 +153,28 @@ export default function Home() {
           }
         }
         pc.addEventListener("iceconnectionstatechange", handler)
-        // Fallback resolve after 2s in case state doesn't fire but media flows
         setTimeout(() => {
           pc.removeEventListener("iceconnectionstatechange", handler)
           resolve()
         }, 2000)
       })
 
+      // 7) Kickoff greeting (additional to server conversation_starters)
       dc.send(
         JSON.stringify({
           type: "response.create",
           response: {
             instructions: "Please greet the user and introduce yourself as Densight's SDR. Keep it short and friendly.",
-            modalities: ["audio"], // ensure spoken reply
+            modalities: ["audio"],
           },
         }),
       )
 
-      // Optional: also append a tiny user input to wake up NLP pipelines
+      // Optional tiny user poke
       dc.send(JSON.stringify({ type: "input_text.append", text: "Hi there!" }))
       dc.send(JSON.stringify({ type: "response.create" }))
 
+      // Helpful connection logs
       pc.addEventListener("connectionstatechange", () => console.log("pc", pc.connectionState))
       pc.addEventListener("iceconnectionstatechange", () => console.log("ice", pc.iceConnectionState))
 
@@ -192,102 +196,35 @@ export default function Home() {
   }
 
   useEffect(() => {
-    // Clear transcripts when session stops (optional)
-    // if (status === "idle") { setYou(""); setAgent(""); }
+    // if (status === "idle") { setYou(""); setAgent(""); } // optional reset
   }, [status])
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
-      <main className="mx-auto max-w-4xl p-6">
-        <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-slate-900 mb-2">Densight</h1>
-          <p className="text-lg text-slate-600">AI Voice Sales Development Representative</p>
-          <div className="w-24 h-1 bg-blue-600 mx-auto mt-4 rounded-full"></div>
-        </div>
+    <main className="mx-auto max-w-4xl p-6">
+      <h1 className="text-2xl font-semibold mb-4">Densight — AI Voice SDR</h1>
 
-        <div className="bg-white rounded-2xl shadow-lg p-8 mb-6">
-          <div className="flex items-center justify-center gap-4 mb-6">
-            <button
-              onClick={start}
-              disabled={status !== "idle"}
-              className="flex items-center gap-2 px-6 py-3 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium transition-colors"
-            >
-              <Phone className="w-5 h-5" />
-              Start Call
-            </button>
-            <button
-              onClick={stop}
-              disabled={status !== "connected"}
-              className="flex items-center gap-2 px-6 py-3 rounded-xl bg-red-600 hover:bg-red-700 disabled:bg-gray-400 text-white font-medium transition-colors"
-            >
-              <PhoneOff className="w-5 h-5" />
-              End Call
-            </button>
-          </div>
+      <div className="flex gap-3 mb-4">
+        <button onClick={start} disabled={status !== "idle"} className="px-4 py-2 rounded bg-black text-white">
+          Start
+        </button>
+        <button onClick={stop} disabled={status !== "connected"} className="px-4 py-2 rounded border">
+          Stop
+        </button>
+        <span className="px-3 py-2 rounded border text-sm">{status}</span>
+      </div>
 
-          <div className="flex items-center justify-center gap-2">
-            <div
-              className={`w-3 h-3 rounded-full ${
-                status === "idle"
-                  ? "bg-gray-400"
-                  : status === "connecting"
-                    ? "bg-yellow-500 animate-pulse"
-                    : "bg-green-500"
-              }`}
-            ></div>
-            <span className="text-sm font-medium text-slate-700 capitalize">
-              {status === "idle" ? "Ready to connect" : status === "connecting" ? "Connecting..." : "Connected"}
-            </span>
-          </div>
-        </div>
+      {errors && <div className="mb-3 text-sm text-red-600 border border-red-300 rounded p-2">{errors}</div>}
 
-        {errors && (
-          <div className="mb-6 text-sm text-red-600 border border-red-300 rounded-xl p-4 bg-red-50">
-            <strong>Error:</strong> {errors}
-          </div>
-        )}
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="bg-white rounded-2xl shadow-lg p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="flex items-center gap-2">
-                {status === "connected" ? (
-                  <Mic className="w-5 h-5 text-green-600" />
-                ) : (
-                  <MicOff className="w-5 h-5 text-gray-400" />
-                )}
-                <h2 className="text-lg font-semibold text-slate-900">You (transcript)</h2>
-              </div>
-            </div>
-
-            <div className="bg-slate-50 rounded-xl p-4 h-64 overflow-auto">
-              <div className="whitespace-pre-wrap text-slate-700 leading-relaxed text-sm">
-                {you || (
-                  <div className="text-slate-400 italic text-center mt-20">Say something… your words appear here.</div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-white rounded-2xl shadow-lg p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <h2 className="text-lg font-semibold text-slate-900">Agent</h2>
-            </div>
-
-            <div className="bg-slate-50 rounded-xl p-4 h-64 overflow-auto">
-              <div className="whitespace-pre-wrap text-slate-700 leading-relaxed text-sm">
-                {agent || (
-                  <div className="text-slate-400 italic text-center mt-20">Agent replies will appear here.</div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="text-center mt-8 text-sm text-slate-500">
-          <p>Click "Start Call" to begin your AI-powered sales conversation</p>
-        </div>
-      </main>
-    </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <section className="border rounded p-3 h-64 overflow-auto whitespace-pre-wrap text-sm">
+          <h3 className="font-medium mb-2">You (transcript)</h3>
+          {you || "Say something… your words appear here."}
+        </section>
+        <section className="border rounded p-3 h-64 overflow-auto whitespace-pre-wrap text-sm">
+          <h3 className="font-medium mb-2">Agent</h3>
+          {agent || "Agent replies will appear here."}
+        </section>
+      </div>
+    </main>
   )
 }
