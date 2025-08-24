@@ -8,6 +8,27 @@ type Conn = {
   mic: MediaStream | null
 }
 
+function waitForChannelOpen(dc: RTCDataChannel, timeoutMs = 8000) {
+  if (dc.readyState === "open") return Promise.resolve()
+  return new Promise<void>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("DC open timeout")), timeoutMs)
+    const onOpen = () => {
+      clearTimeout(t)
+      dc.removeEventListener("open", onOpen)
+      dc.removeEventListener("close", onClose)
+      resolve()
+    }
+    const onClose = () => {
+      clearTimeout(t)
+      dc.removeEventListener("open", onOpen)
+      dc.removeEventListener("close", onClose)
+      reject(new Error("DC closed before open"))
+    }
+    dc.addEventListener("open", onOpen)
+    dc.addEventListener("close", onClose)
+  })
+}
+
 export default function Home() {
   const [status, setStatus] = useState<"idle" | "connecting" | "connected">("idle")
   const [you, setYou] = useState("") // Your transcript (STT)
@@ -24,8 +45,13 @@ export default function Home() {
       setErrors(null)
       setStatus("connecting")
 
-      const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "https://<your-render-url>"
+      const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "https://<your-render-service>.onrender.com"
+
       const sessionRes = await fetch(`${BASE}/session`, { method: "POST" })
+      if (!sessionRes.ok) {
+        const txt = await sessionRes.text()
+        throw new Error(`/session failed: ${sessionRes.status} ${txt.slice(0, 200)}`)
+      }
       const session = await sessionRes.json()
       const clientSecret = session?.client_secret?.value
       if (!clientSecret) throw new Error("No client_secret returned from /session")
@@ -50,8 +76,7 @@ export default function Home() {
         if (audioRef.current) audioRef.current.srcObject = e.streams[0]
       }
 
-      // 3) Data channel for events (create BEFORE offer)
-      const dc = pc.createDataChannel("oai-events")
+      const dc = pc.createDataChannel("oai-events", { ordered: true })
       conn.current.dc = dc
 
       dc.onmessage = (ev) => {
@@ -121,6 +146,24 @@ export default function Home() {
       const answerSDP = await sdpResp.text()
       await pc.setRemoteDescription({ type: "answer", sdp: answerSDP })
 
+      await waitForChannelOpen(dc)
+
+      await new Promise<void>((resolve) => {
+        if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") return resolve()
+        const handler = () => {
+          if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+            pc.removeEventListener("iceconnectionstatechange", handler)
+            resolve()
+          }
+        }
+        pc.addEventListener("iceconnectionstatechange", handler)
+        // Fallback resolve after 2s in case state doesn't fire but media flows
+        setTimeout(() => {
+          pc.removeEventListener("iceconnectionstatechange", handler)
+          resolve()
+        }, 2000)
+      })
+
       dc.send(
         JSON.stringify({
           type: "response.create",
@@ -156,9 +199,8 @@ export default function Home() {
   }
 
   useEffect(() => {
-    if (status === "idle") {
-      // setYou(""); setAgent("");
-    }
+    // Clear transcripts when session stops (optional)
+    // if (status === "idle") { setYou(""); setAgent(""); }
   }, [status])
 
   return (
