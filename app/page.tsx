@@ -15,7 +15,7 @@ export default function Home() {
       setStatus("connecting")
 
       // 1) Ask backend (Render) to mint short-lived Realtime session
-      const sessionRes = await fetch("https://<your-render-url>/session", { method: "POST" })
+      const sessionRes = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/session`, { method: "POST" })
       const session = await sessionRes.json()
       const clientSecret = session?.client_secret?.value
       if (!clientSecret) throw new Error("No client_secret from backend")
@@ -45,7 +45,7 @@ export default function Home() {
           } else if (msg.type === "response.output_text.done") {
             setTranscript((p) => p + "\n")
           } else if (msg.type === "response.function_call" && msg.name === "logLead") {
-            fetch("https://<your-render-url>/tools/logLead", {
+            fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/tools/logLead`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(msg.arguments || {}),
